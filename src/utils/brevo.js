@@ -1,23 +1,15 @@
 // ── Brevo (Sendinblue) transactional email utility ────────────────────────────
 // Template 1 = Invoice  |  Template 2 = Payment Confirmation
 //
-// ⚠️  The API key is NEVER hardcoded here.
-// It is read from the environment variable VITE_BREVO_API_KEY.
-// On Netlify → Site configuration → Environment variables → add VITE_BREVO_API_KEY
-// Locally    → create a .env file in your project root with:
-//              VITE_BREVO_API_KEY=xkeysib-your-full-key-here
+// ⚠️  The API key is NEVER in client code.
+// All Brevo calls go through /.netlify/functions/send-email (server-side).
+// On Netlify → Site configuration → Environment variables → add BREVO_API_KEY
+// (NO VITE_ prefix — that would expose it in the client bundle)
 
-const BREVO_API_KEY = import.meta.env.VITE_BREVO_API_KEY
-const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email'
-const BASE_URL      = 'https://echorisemedia.com'
-
-const SENDER = { name: 'Echorise Media', email: 'support@echorisemedia.com' }
+const BASE_URL = 'https://echorisemedia.com'
+const SENDER   = { name: 'Echorise Media', email: 'support@echorisemedia.com' }
 
 // ── Formspree — owner notification helper ────────────────────────────────────
-// Sends an instant notification to the site owner via Formspree.
-// formId  : the Formspree form ID (e.g. 'mojppyke')
-// payload : plain object of fields to include in the notification email
-// Non-blocking — never throws; owner notification must not break the user flow.
 export async function notifyOwner(formId, payload) {
   try {
     await fetch(`https://formspree.io/f/${formId}`, {
@@ -39,7 +31,6 @@ function dueIn(days = 7) {
     .toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })
 }
 
-/** Build the invoice deep-link so the artist lands on /order with amount pre-filled */
 function buildPaymentLink({ invoiceNum, amount, service, artistName, artistEmail }) {
   const params = new URLSearchParams({
     ref:     invoiceNum,
@@ -51,42 +42,25 @@ function buildPaymentLink({ invoiceNum, amount, service, artistName, artistEmail
   return `${BASE_URL}/order?${params.toString()}`
 }
 
+// Sends payload to the Netlify function which calls Brevo server-side
 async function post(payload) {
-  if (!BREVO_API_KEY) {
-    console.error('Brevo: VITE_BREVO_API_KEY is not set. Add it to Netlify environment variables.')
-    throw new Error('Brevo API key is missing.')
-  }
-  const res = await fetch(BREVO_API_URL, {
+  const res = await fetch('/.netlify/functions/send-email', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'api-key': BREVO_API_KEY },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
-    throw new Error(err.message || `Brevo error ${res.status}`)
+    throw new Error(err.error || `Server error ${res.status}`)
   }
   return res.json()
 }
 
 // ── Template 1 — Invoice ─────────────────────────────────────────────────────
-/**
- * @param {{
- *   artistName: string,
- *   artistEmail: string,
- *   artistPhone?: string,
- *   service: string,
- *   amount: number,
- *   invoiceNum: string,
- *   trackTitle?: string,
- *   trackLink?: string,
- *   notes?: string,
- *   country?: string,
- * }} p
- */
 export async function sendInvoiceEmail(p) {
-  const invoiceDate  = today()
-  const dueDate      = dueIn(7)
-  const paymentLink  = buildPaymentLink({
+  const invoiceDate = today()
+  const dueDate     = dueIn(7)
+  const paymentLink = buildPaymentLink({
     invoiceNum:  p.invoiceNum,
     amount:      p.amount,
     service:     p.service,
@@ -97,23 +71,23 @@ export async function sendInvoiceEmail(p) {
   const platform = p.service.split('–')[0].replace('Promotion', '').trim() || 'Music Promotion'
 
   return post({
-    to:        [{ email: p.artistEmail, name: p.artistName }],
-    sender:    SENDER,
-    replyTo:   SENDER,
+    to:         [{ email: p.artistEmail, name: p.artistName }],
+    sender:     SENDER,
+    replyTo:    SENDER,
     templateId: 1,
     params: {
       artist_name:    p.artistName,
       customer_email: p.artistEmail,
       customer_phone: p.artistPhone || '',
-      country:        p.country    || '',
+      country:        p.country     || '',
       invoice_number: p.invoiceNum,
       invoice_date:   invoiceDate,
       due_date:       dueDate,
       package_name:   p.service,
       platform:       platform,
-      track_title:    p.trackTitle || '',
-      track_link:     p.trackLink  || '',
-      notes:          p.notes      || '',
+      track_title:    p.trackTitle  || '',
+      track_link:     p.trackLink   || '',
+      notes:          p.notes       || '',
       amount_usd:     p.amount > 0 ? p.amount.toFixed(2) : '0.00',
       payment_link:   paymentLink,
       website_url:    BASE_URL,
@@ -125,23 +99,6 @@ export async function sendInvoiceEmail(p) {
 }
 
 // ── Template 2 — Payment Confirmation ────────────────────────────────────────
-/**
- * @param {{
- *   artistName: string,
- *   artistEmail: string,
- *   artistPhone?: string,
- *   platform: string,
- *   packageName: string,
- *   country: string,
- *   price: number,
- *   invoiceNum: string,
- *   transactionRef?: string,
- *   trackLink?: string,
- *   localAmount?: number,
- *   localCurrency?: string,
- *   notes?: string,
- * }} p
- */
 export async function sendPaymentConfirmation(p) {
   const paymentDate = today()
 
@@ -151,9 +108,9 @@ export async function sendPaymentConfirmation(p) {
       : ''
 
   return post({
-    to:        [{ email: p.artistEmail, name: p.artistName }],
-    sender:    SENDER,
-    replyTo:   SENDER,
+    to:         [{ email: p.artistEmail, name: p.artistName }],
+    sender:     SENDER,
+    replyTo:    SENDER,
     templateId: 2,
     params: {
       artist_name:          p.artistName,
@@ -165,8 +122,8 @@ export async function sendPaymentConfirmation(p) {
       transaction_ref:      p.transactionRef || p.invoiceNum,
       platform:             p.platform,
       package_name:         p.packageName,
-      track_link:           p.trackLink || '',
-      notes:                p.notes     || '',
+      track_link:           p.trackLink      || '',
+      notes:                p.notes          || '',
       amount_usd:           p.price > 0 ? String(p.price) : '0',
       amount_local_display: amountLocalDisplay,
       website_url:          BASE_URL,
