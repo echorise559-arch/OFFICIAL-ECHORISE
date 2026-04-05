@@ -105,7 +105,7 @@ export default function Footer() {
         </div>
 
         <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
-          <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>© 2025 Echorise Media. All rights reserved.</span>
+          <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>© 2026 Echorise Media. All rights reserved.</span>
           <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>Built for artists who refuse to go unheard.</span>
         </div>
       </div>

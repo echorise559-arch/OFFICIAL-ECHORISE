@@ -40,39 +40,47 @@ const CURRENCY_MAP = {
 // we skip the form and launch Flutterwave directly with live exchange rates.
 function InvoicePayMode({ invoiceRef, amountUSD, artistName, artistEmail, service }) {
   const navigate = useNavigate()
-  const [status, setStatus] = useState('idle') // idle | loading | processing | error
-  const [localDisplay, setLocalDisplay] = useState(null)
+  const [status, setStatus]       = useState('idle') // idle | loading | processing
+  const [country, setCountry]     = useState('')
+  const [localAmount, setLocal]   = useState(null)  // { amount, currency } | null
+  const [rateLoading, setRateLoading] = useState(false)
 
-  // Try to detect country from browser locale for currency — fallback USD
-  const detectedCurrency = 'USD'
+  const currency = CURRENCY_MAP[country] || 'USD'
 
-  // Show live exchange rate on load
+  // Fetch live exchange rate whenever country changes
   useEffect(() => {
-    if (amountUSD <= 0) return
+    if (!country || currency === 'USD') { setLocal(null); return }
+    setRateLoading(true)
     fetch('https://open.er-api.com/v6/latest/USD')
       .then(r => r.json())
       .then(d => {
-        // We'll use USD as default since we don't know their country yet
-        setLocalDisplay({ amount: amountUSD, currency: 'USD' })
+        const rate = d.rates?.[currency]
+        if (rate) setLocal({ amount: Math.round(amountUSD * rate * 100) / 100, currency })
+        else setLocal(null)
       })
-      .catch(() => {})
-  }, [amountUSD])
+      .catch(() => setLocal(null))
+      .finally(() => setRateLoading(false))
+  }, [country, currency, amountUSD])
 
   const handleInvoicePay = async () => {
     if (amountUSD <= 0) return
     setStatus('loading')
 
-    // Fetch live rate fresh right before charge
+    // Always fetch a fresh live rate right before charging — never use stale state
     let chargeAmount = amountUSD
-    let currency = 'USD'
+    let chargeCurrency = currency
 
     try {
-      const r = await fetch('https://open.er-api.com/v6/latest/USD')
-      const d = await r.json()
-      // Use USD — artist can pay in USD from any country via card
-      chargeAmount = amountUSD
-      currency = 'USD'
-    } catch (_) {}
+      if (chargeCurrency !== 'USD') {
+        const r    = await fetch('https://open.er-api.com/v6/latest/USD')
+        const d    = await r.json()
+        const rate = d.rates?.[chargeCurrency]
+        if (rate) chargeAmount = Math.round(amountUSD * rate * 100) / 100
+        else { chargeAmount = amountUSD; chargeCurrency = 'USD' } // fallback
+      }
+    } catch (_) {
+      chargeAmount = amountUSD; chargeCurrency = 'USD'
+    }
 
     setStatus('processing')
 
@@ -80,12 +88,9 @@ function InvoicePayMode({ invoiceRef, amountUSD, artistName, artistEmail, servic
       public_key: 'FLWPUBK-f9b17c5ddc2ffc1700b32fa0ff03eec8-X',
       tx_ref: invoiceRef,
       amount: chargeAmount,
-      currency: currency,
+      currency: chargeCurrency,
       payment_options: 'card,banktransfer,ussd,mobilemoney,barter,nqr',
-      customer: {
-        email: artistEmail,
-        name: artistName,
-      },
+      customer: { email: artistEmail, name: artistName },
       customizations: {
         title: 'Echorise Media',
         description: service || 'Music Promotion Invoice',
@@ -93,59 +98,67 @@ function InvoicePayMode({ invoiceRef, amountUSD, artistName, artistEmail, servic
       },
       callback: async function (data) {
         if (data.status === 'successful' || data.status === 'completed') {
-          // Send Brevo payment confirmation
           try {
             await sendPaymentConfirmation({
               artistName,
               artistEmail,
               platform:       service?.split('–')[0]?.trim() || 'Music Promotion',
               packageName:    service || 'Invoice Payment',
-              country:        '',
+              country:        country || '',
               price:          amountUSD,
               invoiceNum:     invoiceRef,
               transactionRef: data.transaction_id ? `FLW-${data.transaction_id}` : invoiceRef,
               trackLink:      '',
               localAmount:    chargeAmount,
-              localCurrency:  currency,
+              localCurrency:  chargeCurrency,
             })
-          } catch (e) {
-            console.error('Brevo error:', e)
-          }
-          // Notify owner via Formspree after confirmed payment
+          } catch (e) { console.error('Brevo error:', e) }
+
           notifyOwner(PAYMENT_FORM_ID, {
-            _subject: `💰 Invoice Payment Confirmed — ${artistName} · ${service} · $${amountUSD}`,
+            _subject:       `💰 Invoice Payment Confirmed — ${artistName} · ${service} · ${chargeCurrency} ${chargeAmount.toLocaleString()}`,
             formType:       'invoice_payment_confirmed',
             artistName,
             email:          artistEmail,
+            country:        country || 'Not specified',
             service,
             amountUSD:      `$${amountUSD}`,
+            amountCharged:  `${chargeCurrency} ${chargeAmount.toLocaleString()}`,
             invoiceRef,
             transactionRef: data.transaction_id ? `FLW-${data.transaction_id}` : invoiceRef,
             confirmedAt:    new Date().toISOString(),
           })
+
           navigate('/success', {
             state: {
-              orderData:  { artistName, email: artistEmail, platform: service, package: service },
-              invoiceNum: invoiceRef,
-              price:      amountUSD,
+              orderData:    { artistName, email: artistEmail, platform: service, package: service },
+              invoiceNum:   invoiceRef,
+              price:        amountUSD,
+              localAmount:  chargeAmount,
+              localCurrency: chargeCurrency,
             },
           })
         } else {
           setStatus('idle')
         }
       },
-      onclose: function () {
-        setStatus('idle')
-      },
+      onclose: function () { setStatus('idle') },
     })
   }
+
+  // Build pay button label
+  const payLabel = (() => {
+    if (status === 'loading' || status === 'processing') return '⏳ Opening Payment…'
+    if (localAmount && !rateLoading)
+      return `🔒 Pay ${localAmount.currency} ${localAmount.amount.toLocaleString()} (≈ $${amountUSD} USD)`
+    return `🔒 Pay $${amountUSD.toFixed(2)} USD via Flutterwave`
+  })()
 
   return (
     <>
       <PageHero
         label="Invoice Payment"
         title={<>Complete Your <span className="grad-text">Payment</span></>}
-        subtitle="Your invoice is ready. Review the details below and pay securely via Flutterwave."
+        subtitle="Your invoice is ready. Select your country to see the exact amount in your local currency, then pay securely."
         image="https://images.unsplash.com/photo-1510915361894-db8b60106cb1?w=900&h=700&fit=crop&crop=center"
       />
       <section className="py-10 px-6 pb-28" style={{ background: '#FFFFFF' }}>
@@ -166,21 +179,49 @@ function InvoicePayMode({ invoiceRef, amountUSD, artistName, artistEmail, servic
               </div>
             </div>
 
-            {[
-              ['Artist', artistName],
-              ['Email', artistEmail],
-              ['Service', service || '—'],
-            ].map(([k, v]) => (
+            {[['Artist', artistName], ['Email', artistEmail], ['Service', service || '—']].map(([k, v]) => (
               <div key={k} className="flex justify-between py-2.5 text-sm" style={{ borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
                 <span className="text-muted">{k}</span>
                 <span className="text-gray-900 font-medium">{v}</span>
               </div>
             ))}
 
+            {/* Live amount display */}
             <div className="flex justify-between pt-4 font-display font-bold text-xl">
               <span className="text-gray-900">Amount Due</span>
-              <span className="grad-text">${amountUSD.toFixed(2)} USD</span>
+              <span className="grad-text">
+                {rateLoading
+                  ? '…'
+                  : localAmount
+                    ? `${localAmount.currency} ${localAmount.amount.toLocaleString()} (≈ $${amountUSD} USD)`
+                    : `$${amountUSD.toFixed(2)} USD`}
+              </span>
             </div>
+          </div>
+
+          {/* Country selector — drives currency + live rate */}
+          <div className="glass-card p-8">
+            <label className="block text-xs font-display font-bold mb-2 uppercase tracking-wider" style={{ color: '#FF6A00' }}>
+              Your Country — sets your payment currency
+            </label>
+            <select
+              value={country}
+              onChange={e => setCountry(e.target.value)}
+              className="form-input w-full"
+            >
+              <option value="">Select your country (defaults to USD)</option>
+              {COUNTRIES.map(c => (
+                <option key={c.name} value={c.name}>
+                  {c.flag} {c.name} — {CURRENCY_MAP[c.name] || 'USD'}
+                </option>
+              ))}
+            </select>
+            {country && (
+              <p className="text-xs mt-2" style={{ color: '#6B6B6B' }}>
+                You will be charged in <strong>{currency}</strong>
+                {localAmount && !rateLoading ? ` at the live rate: ${currency} ${localAmount.amount.toLocaleString()} = $${amountUSD} USD` : rateLoading ? ' — fetching live rate…' : ''}
+              </p>
+            )}
           </div>
 
           {/* Pay button */}
@@ -196,14 +237,14 @@ function InvoicePayMode({ invoiceRef, amountUSD, artistName, artistEmail, servic
             </div>
             <button
               onClick={handleInvoicePay}
-              disabled={status === 'processing' || status === 'loading'}
+              disabled={status === 'processing' || status === 'loading' || rateLoading}
               className="btn-primary w-full justify-center py-4 text-base disabled:opacity-60"
             >
-              {status === 'loading' || status === 'processing'
-                ? '⏳ Opening Payment…'
-                : `🔒 Pay $${amountUSD.toFixed(2)} USD via Flutterwave`}
+              {payLabel}
             </button>
-            <p className="text-center text-muted text-xs mt-3">256-bit SSL encryption · Receipt emailed after payment</p>
+            <p className="text-center text-muted text-xs mt-3">
+              256-bit SSL · Live exchange rates · Receipt emailed after payment
+            </p>
           </div>
 
         </div>
