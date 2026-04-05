@@ -1,0 +1,5 @@
+# Echorise Media — SPA fallback redirects
+# This file is a backup for the [[redirects]] in netlify.toml.
+# Having both ensures Netlify never shows a 404 on page refresh.
+
+/*    /index.html    200

@@ -1,0 +1,25 @@
+# Echorise Media — robots.txt
+# https://echorisemedia.com/robots.txt
+
+User-agent: *
+Allow: /
+
+# Block internal/transactional pages from indexing
+Disallow: /success
+Disallow: /404
+
+# Allow all crawlers to access CSS, JS and images
+Allow: /src/
+Allow: /assets/
+Allow: /*.css
+Allow: /*.js
+Allow: /*.png
+Allow: /*.svg
+Allow: /*.jpg
+Allow: /*.webp
+
+# Sitemap location — Google & Bing will auto-discover this
+Sitemap: https://echorisemedia.com/sitemap.xml
+
+# Crawl-delay for polite bots (not honoured by Googlebot, but good practice)
+Crawl-delay: 1
