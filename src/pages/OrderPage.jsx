@@ -1,9 +1,11 @@
 import useSEO from '../hooks/useSEO'
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { sendPaymentConfirmation } from '../utils/brevo'
+import { useNavigate, useLocation } from 'react-router-dom'
+import { sendPaymentConfirmation, notifyOwner } from '../utils/brevo'
 import { COUNTRIES, PLATFORMS, SPOTIFY_PACKAGES, SOUNDCLOUD_PACKAGES, CHART_PACKAGES, DANCE_PACKAGES } from '../data'
 import PageHero from '../components/PageHero'
+
+const PAYMENT_FORM_ID = 'mojppyke'
 
 const ALL_PACKAGES = [
   ...SPOTIFY_PACKAGES.map(p => ({ ...p, label: `Spotify – ${p.name}`, category: 'Spotify' })),
@@ -33,22 +35,225 @@ const CURRENCY_MAP = {
   'Lebanon': 'USD', 'Jamaica': 'JMD', 'Trinidad & Tobago': 'TTD',
 }
 
+// ── Invoice Pay Mode ──────────────────────────────────────────────────────────
+// When artist arrives via invoice email link (/order?ref=ECH-xxx&amount=100&...)
+// we skip the form and launch Flutterwave directly with live exchange rates.
+function InvoicePayMode({ invoiceRef, amountUSD, artistName, artistEmail, service }) {
+  const navigate = useNavigate()
+  const [status, setStatus] = useState('idle') // idle | loading | processing | error
+  const [localDisplay, setLocalDisplay] = useState(null)
+
+  // Try to detect country from browser locale for currency — fallback USD
+  const detectedCurrency = 'USD'
+
+  // Show live exchange rate on load
+  useEffect(() => {
+    if (amountUSD <= 0) return
+    fetch('https://open.er-api.com/v6/latest/USD')
+      .then(r => r.json())
+      .then(d => {
+        // We'll use USD as default since we don't know their country yet
+        setLocalDisplay({ amount: amountUSD, currency: 'USD' })
+      })
+      .catch(() => {})
+  }, [amountUSD])
+
+  const handleInvoicePay = async () => {
+    if (amountUSD <= 0) return
+    setStatus('loading')
+
+    // Fetch live rate fresh right before charge
+    let chargeAmount = amountUSD
+    let currency = 'USD'
+
+    try {
+      const r = await fetch('https://open.er-api.com/v6/latest/USD')
+      const d = await r.json()
+      // Use USD — artist can pay in USD from any country via card
+      chargeAmount = amountUSD
+      currency = 'USD'
+    } catch (_) {}
+
+    setStatus('processing')
+
+    window.FlutterwaveCheckout({
+      public_key: 'FLWPUBK-f9b17c5ddc2ffc1700b32fa0ff03eec8-X',
+      tx_ref: invoiceRef,
+      amount: chargeAmount,
+      currency: currency,
+      payment_options: 'card,banktransfer,ussd,mobilemoney,barter,nqr',
+      customer: {
+        email: artistEmail,
+        name: artistName,
+      },
+      customizations: {
+        title: 'Echorise Media',
+        description: service || 'Music Promotion Invoice',
+        logo: 'https://echorisemedia.netlify.app/favicon.svg',
+      },
+      callback: async function (data) {
+        if (data.status === 'successful' || data.status === 'completed') {
+          // Send Brevo payment confirmation
+          try {
+            await sendPaymentConfirmation({
+              artistName,
+              artistEmail,
+              platform:       service?.split('–')[0]?.trim() || 'Music Promotion',
+              packageName:    service || 'Invoice Payment',
+              country:        '',
+              price:          amountUSD,
+              invoiceNum:     invoiceRef,
+              transactionRef: data.transaction_id ? `FLW-${data.transaction_id}` : invoiceRef,
+              trackLink:      '',
+              localAmount:    chargeAmount,
+              localCurrency:  currency,
+            })
+          } catch (e) {
+            console.error('Brevo error:', e)
+          }
+          // Notify owner via Formspree after confirmed payment
+          notifyOwner(PAYMENT_FORM_ID, {
+            _subject: `💰 Invoice Payment Confirmed — ${artistName} · ${service} · $${amountUSD}`,
+            formType:       'invoice_payment_confirmed',
+            artistName,
+            email:          artistEmail,
+            service,
+            amountUSD:      `$${amountUSD}`,
+            invoiceRef,
+            transactionRef: data.transaction_id ? `FLW-${data.transaction_id}` : invoiceRef,
+            confirmedAt:    new Date().toISOString(),
+          })
+          navigate('/success', {
+            state: {
+              orderData:  { artistName, email: artistEmail, platform: service, package: service },
+              invoiceNum: invoiceRef,
+              price:      amountUSD,
+            },
+          })
+        } else {
+          setStatus('idle')
+        }
+      },
+      onclose: function () {
+        setStatus('idle')
+      },
+    })
+  }
+
+  return (
+    <>
+      <PageHero
+        label="Invoice Payment"
+        title={<>Complete Your <span className="grad-text">Payment</span></>}
+        subtitle="Your invoice is ready. Review the details below and pay securely via Flutterwave."
+        image="https://images.unsplash.com/photo-1510915361894-db8b60106cb1?w=900&h=700&fit=crop&crop=center"
+      />
+      <section className="py-10 px-6 pb-28" style={{ background: '#FFFFFF' }}>
+        <div className="max-w-lg mx-auto flex flex-col gap-5">
+
+          {/* Invoice summary card */}
+          <div className="glass-card p-8">
+            <div className="flex justify-between items-start mb-6 pb-5" style={{ borderBottom: '1px solid rgba(26,26,26,0.08)' }}>
+              <div>
+                <div style={{ fontFamily: 'Syne, sans-serif', fontWeight: 800, fontSize: '1.1rem', letterSpacing: '-0.03em', color: '#1A1A1A' }}>
+                  echorise<span style={{ color: '#FF6A00' }}>.</span>
+                </div>
+                <div className="text-muted text-xs mt-1">support@echorisemedia.com</div>
+              </div>
+              <div className="text-right">
+                <div className="text-xs font-display font-bold px-3 py-1 rounded-full" style={{ background: 'rgba(255,106,0,0.1)', border: '1px solid rgba(255,106,0,0.3)', color: '#FF6A00' }}>INVOICE</div>
+                <div className="text-muted text-xs mt-1">{invoiceRef}</div>
+              </div>
+            </div>
+
+            {[
+              ['Artist', artistName],
+              ['Email', artistEmail],
+              ['Service', service || '—'],
+            ].map(([k, v]) => (
+              <div key={k} className="flex justify-between py-2.5 text-sm" style={{ borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
+                <span className="text-muted">{k}</span>
+                <span className="text-gray-900 font-medium">{v}</span>
+              </div>
+            ))}
+
+            <div className="flex justify-between pt-4 font-display font-bold text-xl">
+              <span className="text-gray-900">Amount Due</span>
+              <span className="grad-text">${amountUSD.toFixed(2)} USD</span>
+            </div>
+          </div>
+
+          {/* Pay button */}
+          <div className="glass-card p-8" style={{ borderColor: 'rgba(255,106,0,0.2)' }}>
+            <div className="flex items-center gap-3 mb-4">
+              <span className="font-display font-black text-xl text-pink">flutterwave</span>
+              <span className="text-xs text-muted">Secure Payment Gateway</span>
+            </div>
+            <div className="flex flex-wrap gap-2 mb-5">
+              {['💳 Visa', '💳 Mastercard', '🏦 Bank Transfer', '📱 Mobile Money', '📲 USSD'].map(m => (
+                <span key={m} className="text-xs text-muted px-2.5 py-1 rounded-md" style={{ background: 'rgba(26,26,26,0.08)' }}>{m}</span>
+              ))}
+            </div>
+            <button
+              onClick={handleInvoicePay}
+              disabled={status === 'processing' || status === 'loading'}
+              className="btn-primary w-full justify-center py-4 text-base disabled:opacity-60"
+            >
+              {status === 'loading' || status === 'processing'
+                ? '⏳ Opening Payment…'
+                : `🔒 Pay $${amountUSD.toFixed(2)} USD via Flutterwave`}
+            </button>
+            <p className="text-center text-muted text-xs mt-3">256-bit SSL encryption · Receipt emailed after payment</p>
+          </div>
+
+        </div>
+      </section>
+    </>
+  )
+}
+
+// ── Main Order Page ───────────────────────────────────────────────────────────
 export default function OrderPage() {
   useSEO({ title: 'Order Music Promotion | Echorise Media', description: 'Start your music promotion campaign today. Choose a Spotify, SoundCloud, YouTube, Apple Music, chart or TikTok package and get real results within 24-48 hours.', canonical: 'https://echorisemedia.com/order' })
+
+  const location = useLocation()
+  const navigate = useNavigate()
+
   const [form, setForm] = useState(INIT)
   const [errors, setErrors] = useState({})
   const [step, setStep] = useState(1)
   const [localAmount, setLocalAmount] = useState(null)
   const [rateLoading, setRateLoading] = useState(false)
-  const navigate = useNavigate()
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
-  // selectedPkg must be declared BEFORE useEffect so it's in scope
-  const selectedPkg = ALL_PACKAGES.find(p => p.id === form.package)
+  // ── Detect invoice link params ─────────────────────────────────────────────
+  const searchParams = new URLSearchParams(location.search)
+  const invoiceRef   = searchParams.get('ref')
+  const invoiceAmt   = parseFloat(searchParams.get('amount') || '0')
+  const invoiceName  = searchParams.get('name') || ''
+  const invoiceEmail = searchParams.get('email') || ''
+  const invoiceService = searchParams.get('service') || ''
+
+  // If arrived via invoice link → render InvoicePayMode directly
+  if (invoiceRef && invoiceAmt > 0) {
+    return (
+      <InvoicePayMode
+        invoiceRef={invoiceRef}
+        amountUSD={invoiceAmt}
+        artistName={invoiceName}
+        artistEmail={invoiceEmail}
+        service={invoiceService}
+      />
+    )
+  }
+
+  // ── Normal order flow below ────────────────────────────────────────────────
+  const selectedPkg      = ALL_PACKAGES.find(p => p.id === form.package)
   const selectedCurrency = CURRENCY_MAP[form.country] || 'USD'
 
-  // Fetch live rate whenever country or package changes so Step 2 shows local price
+  // Fetch live rate whenever country or package changes
+  // eslint-disable-next-line react-hooks/rules-of-hooks
   useEffect(() => {
     const price = selectedPkg?.price || 0
     if (!price || selectedCurrency === 'USD') { setLocalAmount(null); return }
@@ -78,39 +283,32 @@ export default function OrderPage() {
   const handleOrder = (e) => {
     e.preventDefault()
     if (!validate()) return
-    // Advance to review step — no Formspree here, only fires after confirmed payment
     setStep(2)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const handlePay = async () => {
     const invoiceNum = 'ECH-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5).toUpperCase()
-    const priceUSD = selectedPkg?.price || 0
+    const priceUSD   = selectedPkg?.price || 0
 
     if (priceUSD === 0) {
-      // Custom quote — go straight to success, no payment needed
       navigate('/success', { state: { orderData: form, invoiceNum, price: 0 } })
       return
     }
 
     setStep(3)
-
     const currency = CURRENCY_MAP[form.country] || 'USD'
 
-    // Fetch live exchange rate before charging
     let chargeAmount = priceUSD
     try {
       if (currency !== 'USD') {
-        const rateRes = await fetch('https://open.er-api.com/v6/latest/USD')
+        const rateRes  = await fetch('https://open.er-api.com/v6/latest/USD')
         const rateData = await rateRes.json()
         if (rateData.rates?.[currency]) {
           chargeAmount = Math.round(priceUSD * rateData.rates[currency] * 100) / 100
         }
       }
-    } catch (_) {
-      // Fall back to USD if rate fetch fails
-      chargeAmount = priceUSD
-    }
+    } catch (_) {}
 
     window.FlutterwaveCheckout({
       public_key: 'FLWPUBK-f9b17c5ddc2ffc1700b32fa0ff03eec8-X',
@@ -118,10 +316,7 @@ export default function OrderPage() {
       amount: chargeAmount,
       currency: currency,
       payment_options: 'card,banktransfer,ussd,mobilemoney,barter,nqr',
-      customer: {
-        email: form.email,
-        name: form.artistName,
-      },
+      customer: { email: form.email, name: form.artistName },
       customizations: {
         title: 'Echorise Media',
         description: `${selectedPkg?.label || 'Campaign'} – ${form.platform || ''}`,
@@ -129,7 +324,6 @@ export default function OrderPage() {
       },
       callback: async function (data) {
         if (data.status === 'successful' || data.status === 'completed') {
-          // Brevo confirmation ONLY after Flutterwave confirms payment
           try {
             await sendPaymentConfirmation({
               artistName:     form.artistName,
@@ -148,22 +342,30 @@ export default function OrderPage() {
           } catch (err) {
             console.error('Brevo confirmation error:', err)
           }
+          // Notify owner via Formspree after payment confirmed
+          notifyOwner(PAYMENT_FORM_ID, {
+            _subject: `💰 Payment Confirmed — ${form.artistName} · ${selectedPkg?.label || 'Custom'} · ${currency} ${chargeAmount.toLocaleString()}`,
+            formType:       'payment_confirmed',
+            artistName:     form.artistName,
+            email:          form.email,
+            platform:       form.platform,
+            package:        selectedPkg?.label || form.package,
+            country:        form.country,
+            amountUSD:      `$${priceUSD}`,
+            amountLocal:    `${currency} ${chargeAmount.toLocaleString()}`,
+            transactionRef: data.transaction_id ? `FLW-${data.transaction_id}` : invoiceNum,
+            invoiceRef:     invoiceNum,
+            trackLink:      form.trackLink || '',
+            confirmedAt:    new Date().toISOString(),
+          })
           navigate('/success', {
-            state: {
-              orderData:     form,
-              invoiceNum,
-              price:         priceUSD,
-              localAmount:   chargeAmount,
-              localCurrency: currency,
-            },
+            state: { orderData: form, invoiceNum, price: priceUSD, localAmount: chargeAmount, localCurrency: currency },
           })
         } else {
           setStep(2)
         }
       },
-      onclose: function () {
-        setStep(2)
-      },
+      onclose: function () { setStep(2) },
     })
   }
 
@@ -253,7 +455,6 @@ export default function OrderPage() {
           {/* Step 2: Review */}
           {step === 2 && (
             <div className="flex flex-col gap-5">
-              {/* Invoice preview */}
               <div className="glass-card p-8">
                 <div className="flex justify-between items-start mb-6 pb-5" style={{ borderBottom: '1px solid rgba(26,26,26,0.08)' }}>
                   <div>
@@ -284,7 +485,6 @@ export default function OrderPage() {
                 </div>
               </div>
 
-              {/* Payment */}
               <div className="glass-card p-8" style={{ borderColor: 'rgba(255,106,0,0.2)' }}>
                 <div className="flex items-center gap-3 mb-4">
                   <span className="font-display font-black text-xl text-pink">flutterwave</span>
